@@ -444,189 +444,23 @@ class Solver:
         self._p2_mi: List[int] = []
 
     def precompute(self) -> None:
-        if self._ready:
-            return
+        """Build all move tables and pruning tables needed by the two-phase solver.
 
-        print("  [autosolve] Precomputing move tables... (this may take a moment)")
-
-        N_CO = 2187
-        N_EO = 2048
-        N_SL = 495
-        N_MOVES = 18
-
-        # Phase 1 move tables
-        self.mt_co = np.zeros((N_CO, N_MOVES), dtype=np.int16)
-        self.mt_eo = np.zeros((N_EO, N_MOVES), dtype=np.int16)
-        self.mt_sl = np.zeros((N_SL, N_MOVES), dtype=np.int16)
-
-        for i in range(N_CO):
-            co = decode_co(i)
-            for mi, m in enumerate(MOVE_NAMES):
-                cc = CubieCube(co=co)
-                cc.apply(m)
-                self.mt_co[i, mi] = encode_co(cc.co)
-
-        for i in range(N_EO):
-            eo = decode_eo(i)
-            for mi, m in enumerate(MOVE_NAMES):
-                cc = CubieCube(eo=eo)
-                cc.apply(m)
-                self.mt_eo[i, mi] = encode_eo(cc.eo)
-
-        for i in range(N_SL):
-            positions = list(decode_slice(i))
-            # Create a dummy EP where slice edges are at these positions
-            ep = list(range(12))
-            # We need positions[k] to hold a slice edge (>=8)
-            # and other positions to hold non-slice edges (<8)
-            non_slice_positions = [p for p in range(12) if p not in positions]
-            ep_test = [0] * 12
-            for k, p in enumerate(positions):
-                ep_test[p] = 8 + k  # place slice edges
-            ns_val = 0
-            for p in range(12):
-                if p not in positions:
-                    ep_test[p] = ns_val
-                    ns_val += 1
-            for mi, m in enumerate(MOVE_NAMES):
-                cc = CubieCube(ep=ep_test[:])
-                cc.apply(m)
-                self.mt_sl[i, mi] = encode_slice(cc.ep)
-
-        print("  [autosolve] Building Phase 1 pruning table...")
-        # Pruning table: CO x Slice
-        self.prun_co_sl = np.full((N_CO, N_SL), 255, dtype=np.uint8)
-        self.prun_co_sl[0, _SOLVED_SLICE_IDX] = 0
-        q = [(0, _SOLVED_SLICE_IDX)]
-        depth = 0
-        total = 1
-        while q:
-            depth += 1
-            nq = []
-            for co, sl in q:
-                for mi in range(N_MOVES):
-                    nco = self.mt_co[co, mi]
-                    nsl = self.mt_sl[sl, mi]
-                    if self.prun_co_sl[nco, nsl] == 255:
-                        self.prun_co_sl[nco, nsl] = depth
-                        nq.append((nco, nsl))
-                        total += 1
-            q = nq
-            print(f"    CO×SL depth {depth}: {total} states filled")
-            if depth >= 12:
-                break
-
-        # Pruning table: EO x Slice
-        self.prun_eo_sl = np.full((N_EO, N_SL), 255, dtype=np.uint8)
-        self.prun_eo_sl[0, _SOLVED_SLICE_IDX] = 0
-        q = [(0, _SOLVED_SLICE_IDX)]
-        depth = 0
-        total = 1
-        while q:
-            depth += 1
-            nq = []
-            for eo, sl in q:
-                for mi in range(N_MOVES):
-                    neo = self.mt_eo[eo, mi]
-                    nsl = self.mt_sl[sl, mi]
-                    if self.prun_eo_sl[neo, nsl] == 255:
-                        self.prun_eo_sl[neo, nsl] = depth
-                        nq.append((neo, nsl))
-                        total += 1
-            q = nq
-            print(f"    EO×SL depth {depth}: {total} states filled")
-            if depth >= 12:
-                break
-
-        # Phase 2 move tables: corner permutation under P2 moves only
-        print("  [autosolve] Building Phase 2 tables...")
-        N_CP = 40320  # 8!
-        N_EP8 = 40320 # 8!
-        N_ESL = 24    # 4!
-        N_P2 = len(P2_MOVE_NAMES)  # 10
-        self._p2_mi = [MOVE_NAMES.index(m) for m in P2_MOVE_NAMES]
-
-        self.mt_cp = np.zeros((N_CP, N_P2), dtype=np.int32)
-        self.mt_ep8 = np.zeros((N_EP8, N_P2), dtype=np.int32)
-        self.mt_esl = np.zeros((N_ESL, N_P2), dtype=np.int8)
-
-        for i in range(N_CP):
-            cp = self._dec_perm(i, 8)
-            for pi, m in enumerate(P2_MOVE_NAMES):
-                cc = CubieCube(cp=cp[:])
-                cc.apply(m)
-                self.mt_cp[i, pi] = encode_cp(cc.cp)
-
-        for i in range(N_EP8):
-            ep = self._dec_perm(i, 8) + [8, 9, 10, 11]
-            for pi, m in enumerate(P2_MOVE_NAMES):
-                cc = CubieCube(ep=ep[:])
-                cc.apply(m)
-                self.mt_ep8[i, pi] = encode_ep8(cc.ep)
-
-        for i in range(N_ESL):
-            ep = [0, 1, 2, 3, 4, 5, 6, 7] + [x + 8 for x in self._dec_perm(i, 4)]
-            for pi, m in enumerate(P2_MOVE_NAMES):
-                cc = CubieCube(ep=ep[:])
-                cc.apply(m)
-                self.mt_esl[i, pi] = encode_eslice(cc.ep)
-
-        # Phase 2 pruning: CP x SlicePerm and EP8 x SlicePerm
-        print("  [autosolve] Building Phase 2 pruning tables...")
-        self.prun_cp_esl = np.full((N_CP, N_ESL), 255, dtype=np.uint8)
-        self.prun_cp_esl[0, 0] = 0
-        q = [(0, 0)]
-        depth = 0
-        total = 1
-        while q:
-            depth += 1
-            nq = []
-            for cp, esl in q:
-                for pi in range(N_P2):
-                    ncp = self.mt_cp[cp, pi]
-                    nesl = self.mt_esl[esl, pi]
-                    if self.prun_cp_esl[ncp, nesl] == 255:
-                        self.prun_cp_esl[ncp, nesl] = depth
-                        nq.append((ncp, nesl))
-                        total += 1
-            q = nq
-            if depth >= 14: break
-
-
-        self.prun_ep8_esl = np.full((N_EP8, N_ESL), 255, dtype=np.uint8)
-        self.prun_ep8_esl[0, 0] = 0
-        q = [(0, 0)]
-        depth = 0
-        total = 1
-        while q:
-            depth += 1
-            nq = []
-            for ep, esl in q:
-                for pi in range(N_P2):
-                    nep = self.mt_ep8[ep, pi]
-                    nesl = self.mt_esl[esl, pi]
-                    if self.prun_ep8_esl[nep, nesl] == 255:
-                        self.prun_ep8_esl[nep, nesl] = depth
-                        nq.append((nep, nesl))
-                        total += 1
-            q = nq
-            if depth >= 14: break
-
-        self._ready = True
-        print("  [autosolve] Tables ready.")
+        TODO: Implement this method. It should populate:
+          - Phase 1 move tables: self.mt_co, self.mt_eo, self.mt_sl
+          - Phase 1 pruning tables: self.prun_co_sl, self.prun_eo_sl
+          - Phase 2 move tables: self.mt_cp, self.mt_ep8, self.mt_esl
+          - Phase 2 pruning tables: self.prun_cp_esl, self.prun_ep8_esl
+          - self._p2_mi and self._ready
+        """
+        raise NotImplementedError("TODO: implement precompute")
 
     def _dec_perm(self, n: int, size: int) -> List[int]:
-        """Decode permutation of given size from Lehmer code index."""
-        p = [0] * size
-        digits = []
-        for i in range(size):
-            digits.append(n % (i + 1))
-            n //= (i + 1)
-        digits.reverse()
-        available = list(range(size))
-        for i in range(size):
-            p[i] = available.pop(digits[i])
-        return p
+        """Decode permutation of given size from Lehmer code index.
+
+        TODO: Implement this method.
+        """
+        raise NotImplementedError("TODO: implement _dec_perm")
 
     def solve(self, cube: RubiksCube) -> List[str]:
         """Solve using Two-Phase IDA*. Returns list of move strings.
